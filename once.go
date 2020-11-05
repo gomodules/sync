@@ -5,6 +5,7 @@
 package sync
 
 import (
+	gsync "sync"
 	"sync/atomic"
 )
 
@@ -17,32 +18,30 @@ type Once struct {
 	// The hot path is inlined at every call site.
 	// Placing done first allows more compact instructions on some architectures (amd64/x86),
 	// and fewer instructions (to calculate offset) on other architectures.
-	done uint32
-	m    Mutex
+	done int32
+	m    gsync.Mutex
 }
 
 // Do calls the function f if and only if Do is being called for the
-// first time for this instance of Once. In other words, given
+// first time successfully for this instance of Once. In other words, given
 // 	var once Once
-// if once.Do(f) is called multiple times, only the first call will invoke f,
-// even if f has a different value in each invocation. A new instance of
-// Once is required for each function to execute.
+// if once.Do(f) is called multiple times, f will be invoked until first successful execution.
+// A new instance of Once is required for each function to execute.
 //
-// Do is intended for initialization that must be run exactly once. Since f
-// is niladic, it may be necessary to use a function literal to capture the
-// arguments to a function to be invoked by Do:
-// 	config.once.Do(func() { config.init(filename) })
+// Do is intended for initialization that must be run exactly once successfully.
 //
 // Because no call to Do returns until the one call to f returns, if f causes
 // Do to be called, it will deadlock.
 //
-// If f panics, Do considers it to have returned; future calls of Do return
+// If f panics, Do considers it to have returned successfully; future calls of Do return
 // without calling f.
 //
-func (o *Once) Do(f func()) {
+// This is an adaptation from https://golang.org/pkg/sync/#Once
+//
+func (o *Once) Do(f func() error) {
 	// Note: Here is an incorrect implementation of Do:
 	//
-	//	if atomic.CompareAndSwapUint32(&o.done, 0, 1) {
+	//	if atomic.CompareAndSwapInt32(&o.done, 0, 1) {
 	//		f()
 	//	}
 	//
@@ -52,19 +51,22 @@ func (o *Once) Do(f func()) {
 	// call f, and the second would return immediately, without
 	// waiting for the first's call to f to complete.
 	// This is why the slow path falls back to a mutex, and why
-	// the atomic.StoreUint32 must be delayed until after f returns.
+	// the atomic.StoreInt32 must be delayed until after f returns.
 
-	if atomic.LoadUint32(&o.done) == 0 {
+	if atomic.LoadInt32(&o.done) == 0 {
 		// Outlined slow-path to allow inlining of the fast-path.
 		o.doSlow(f)
 	}
 }
 
-func (o *Once) doSlow(f func()) {
+func (o *Once) doSlow(f func() error) {
 	o.m.Lock()
 	defer o.m.Unlock()
 	if o.done == 0 {
-		defer atomic.StoreUint32(&o.done, 1)
-		f()
+		defer atomic.StoreInt32(&o.done, 1)
+		err := f()
+		if err != nil {
+			atomic.StoreInt32(&o.done, -1)
+		}
 	}
 }
